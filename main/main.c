@@ -5,6 +5,8 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "sdkconfig.h"
+#include "iot_button.h"
+#include "button_gpio.h"
 
 static const char *TAG = "ATP_BLINKER";
 
@@ -18,12 +20,19 @@ bool blinker_on = false;  // blinker state
 
 QueueHandle_t gpio_evt_queue;   // queue where interrupt events are sent
 
-static void IRAM_ATTR gpio_interrupt_handler(void *arg)
+/**
+ * Button component event callback function
+ */
+static void button_event_cb(void *arg, void *data)
 {
-  uint32_t gpio_num = (uint32_t) arg;
+  iot_button_print_event((button_handle_t)arg);
+  uint32_t gpio_num = (uint32_t) data;
   xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL);
 }
 
+/**
+ * Toggle LED state on reception of event in gpio_evt_queue
+ */
 void blinker_toggle_task(void *arg)
 {
   uint32_t io_num;
@@ -37,33 +46,43 @@ void blinker_toggle_task(void *arg)
   }
 }
 
+/**
+ * Setup button component
+ */
+void button_init(uint32_t button_num)
+{
+  button_config_t btn_cfg = {
+    .long_press_time = CONFIG_BUTTON_LONG_PRESS_TIME_MS,
+    .short_press_time = CONFIG_BUTTON_SHORT_PRESS_TIME_MS,
+  };
+  button_gpio_config_t gpio_cfg = {
+    .gpio_num = button_num,
+    .active_level = 0,
+  };
+
+  button_handle_t btn;
+  esp_err_t ret = iot_button_new_gpio_device(&btn_cfg, &gpio_cfg, &btn);
+  assert(ret == ESP_OK);
+  
+  ret = iot_button_register_cb(btn, BUTTON_SINGLE_CLICK, NULL, button_event_cb, (void *)button_num);
+
+  ESP_ERROR_CHECK(ret);
+}
+
 void app_main(void)
 {
-  /* reset pins to default state */
+  /* reset LED pin to default state */
   gpio_reset_pin(BLINK_GPIO);
-  gpio_reset_pin(BUTTON_GPIO);
 
-  /* set GPIO directions */
+  /* set LED GPIO direction */
   gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);
-  gpio_set_direction(BUTTON_GPIO, GPIO_MODE_INPUT);
 
-  /* enable pulldown for input pin */
-  gpio_pulldown_en(BUTTON_GPIO);
-  /* disable pullup for input pin */
-  gpio_pullup_dis(BUTTON_GPIO);
-  /* set rising edge interrupt type */
-  gpio_set_intr_type(BUTTON_GPIO, GPIO_INTR_POSEDGE);
-
-  /* create a queue to handle gpio events from isr */
+  /* create a queue to handle button events */
   gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
   /* start blinker state toggle task */
   xTaskCreate(blinker_toggle_task, "Blinker control task", 2048, NULL, 1, NULL);
 
-  /* install isr service */
-  gpio_install_isr_service(0);
-  /* hook isr handler up to button gpio */
-  gpio_isr_handler_add(BUTTON_GPIO, gpio_interrupt_handler, (void *)BUTTON_GPIO);
-  
+  button_init(BUTTON_GPIO);
 
   while (1)
   {
