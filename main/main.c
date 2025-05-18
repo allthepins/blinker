@@ -3,6 +3,7 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "driver/gpio.h"
+#include "esp_timer.h"
 #include "esp_log.h"
 #include "sdkconfig.h"
 #include "iot_button.h"
@@ -10,15 +11,14 @@
 
 static const char *TAG = "ATP_BLINKER";
 
-bool blinker_on = false;  // blinker state
-
 /**
  * GPIO for led
  */
-#define BLINK_GPIO GPIO_NUM_2   // GPIO 2 for esp32 devkit V1 built in LED
-#define BUTTON_GPIO GPIO_NUM_0  // GPIO 0 for esp32 devkit V1 BOOT button
+#define BLINK_GPIO GPIO_NUM_2                       // GPIO 2 for esp32 devkit V1 built in LED
+#define BUTTON_GPIO GPIO_NUM_0                      // GPIO 0 for esp32 devkit V1 BOOT button
 
-QueueHandle_t gpio_evt_queue;   // queue where interrupt events are sent
+esp_timer_handle_t led_periodic_timer;              // timer that toggles LED
+const uint64_t LED_PERIODIC_TIMER_PERIOD = 1000000; // timer period of 1 second
 
 /**
  * Button component event callback function
@@ -26,24 +26,30 @@ QueueHandle_t gpio_evt_queue;   // queue where interrupt events are sent
 static void button_event_cb(void *arg, void *data)
 {
   iot_button_print_event((button_handle_t)arg);
-  uint32_t gpio_num = (uint32_t) data;
-  xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL);
+  if (esp_timer_is_active(led_periodic_timer))
+  {
+    ESP_ERROR_CHECK(esp_timer_stop(led_periodic_timer));
+    gpio_set_level(BLINK_GPIO, 0);
+  }
+  else
+  {
+    gpio_set_level(BLINK_GPIO, 1);
+    ESP_ERROR_CHECK(esp_timer_start_periodic(led_periodic_timer, LED_PERIODIC_TIMER_PERIOD));
+  }
 }
 
 /**
- * Toggle LED state on reception of event in gpio_evt_queue
+ * LED periodic timer callback function
  */
-void blinker_toggle_task(void *arg)
+static void led_periodic_timer_callback(void *arg)
 {
-  uint32_t io_num;
-  while (true)
-  {
-    if (xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY))
-    {
-      ESP_LOGI(TAG, "Button (GPIO [%"PRIu32"]) was pressed", io_num);
-      blinker_on = !blinker_on; // toggle state
-    }
-  }
+  ESP_LOGI(TAG, "LED Periodic timer called");
+
+  static bool ON;
+  ESP_LOGI(TAG, "LED ON is: %d", ON);
+  ON = !ON;
+
+  gpio_set_level(BLINK_GPIO, ON);
 }
 
 /**
@@ -69,6 +75,18 @@ void button_init(uint32_t button_num)
   ESP_ERROR_CHECK(ret);
 }
 
+/**
+ * Setup LED periodic timer
+ */
+void led_periodic_timer_init(void){
+  const esp_timer_create_args_t periodic_timer_args = {
+    .callback = &led_periodic_timer_callback,
+    .name = "led_periodic_timer",
+  };
+
+  ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &led_periodic_timer));
+}
+
 void app_main(void)
 {
   /* reset LED pin to default state */
@@ -77,26 +95,7 @@ void app_main(void)
   /* set LED GPIO direction */
   gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);
 
-  /* create a queue to handle button events */
-  gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
-  /* start blinker state toggle task */
-  xTaskCreate(blinker_toggle_task, "Blinker control task", 2048, NULL, 1, NULL);
-
+  /* init button and led timer */
   button_init(BUTTON_GPIO);
-
-  while (1)
-  {
-    if ( blinker_on ) // blink LED
-    {
-      /* LED on */
-      gpio_set_level(BLINK_GPIO, 1);
-      vTaskDelay(1000 / portTICK_PERIOD_MS);  // wait for 1000 ms
-      ESP_LOGI(TAG, "LED on");
-
-      /* LED off */
-      gpio_set_level(BLINK_GPIO, 0);
-      vTaskDelay(1000 / portTICK_PERIOD_MS);
-      ESP_LOGI(TAG, "LED off");
-    }
-  }
+  led_periodic_timer_init();
 }
